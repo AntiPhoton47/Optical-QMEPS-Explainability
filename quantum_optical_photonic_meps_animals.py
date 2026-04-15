@@ -28,11 +28,13 @@ from scipy.linalg import eigh, expm
 ## Basic linear algebra utilities
 
 def dagger(x: np.ndarray) -> np.ndarray:
+    """Return the Hermitian adjoint of a matrix or vector."""
     # Hermitian adjoint used throughout for quantum states and operators.
     return np.conjugate(x.T)
 
 
 def normalize_state(psi: np.ndarray, eps: float = 1e-15) -> np.ndarray:
+    """Normalize a state vector and return it as a column ket."""
     # All pure-state constructors funnel through here so downstream code can
     # safely assume column-vector, unit-norm kets.
     psi = np.asarray(psi, dtype=np.complex128).reshape(-1, 1)
@@ -43,11 +45,13 @@ def normalize_state(psi: np.ndarray, eps: float = 1e-15) -> np.ndarray:
 
 
 def ket_to_dm(psi: np.ndarray) -> np.ndarray:
+    """Convert a pure ket into its density-matrix representation."""
     psi = normalize_state(psi)
     return psi @ dagger(psi)
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
+    """Compute a numerically stable softmax over a vector."""
     x = np.asarray(x, dtype=float)
     z = x - np.max(x)
     exp_z = np.exp(z)
@@ -55,10 +59,12 @@ def softmax(x: np.ndarray) -> np.ndarray:
 
 
 def safe_log(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Take a log after clipping away numerically dangerous zeros."""
     return np.log(np.clip(np.asarray(x, dtype=float), eps, None))
 
 
 def parse_int_list(spec: str) -> Tuple[int, ...]:
+    """Parse a comma-separated list of integers from the CLI."""
     # CLI helper for comma-separated layer/state selections.
     if not spec.strip():
         return ()
@@ -70,18 +76,23 @@ def parse_int_list(spec: str) -> Tuple[int, ...]:
 
 @dataclass
 class QMEPSLayerSpec:
+    # A lightweight description of one semantic layer in the MEPS hierarchy.
     name: str
     size: int
 
 
 @dataclass
 class QMEPSLayerParams:
+    # Hamiltonian coefficients for one adjacent layer pair:
+    # onsite energies, inter-layer hopping, and Kerr-like density couplings.
     onsite: np.ndarray
     hopping: np.ndarray
     density_coupling: np.ndarray
 
 
 class BaseEnv:
+    """Minimal environment protocol for the training and evaluation loops."""
+    # Minimal RL environment interface used by the training/evaluation helpers below.
     def reset(self) -> Any:
         raise NotImplementedError
 
@@ -91,6 +102,8 @@ class BaseEnv:
 
 @dataclass
 class Transition:
+    # One stored agent-environment interaction, enriched with policy statistics
+    # and diagnostic metadata for later replay-based learning.
     percept: Tuple[int, ...]
     action: int
     reward: float
@@ -103,6 +116,8 @@ class Transition:
     
 @dataclass
 class LearningConfig:
+    # Centralized training hyperparameters so experiments can be varied from a
+    # single object and exposed cleanly through the CLI.
     learning_mode: str = "qfim"
     gamma: float = 0.97
     lr_policy: float = 0.04
@@ -127,6 +142,8 @@ class LearningConfig:
 
 @dataclass(frozen=True)
 class DetectorMeasurementConfig:
+    # Declarative specification for which detector ancillas are measured
+    # mid-circuit and how many such measurements are allowed per trajectory.
     layers: Tuple[int, ...] = ()
     states: Tuple[int, ...] = ()
     max_measurements: Optional[int] = None
@@ -140,6 +157,8 @@ class DetectorMeasurementConfig:
 
 @dataclass(frozen=True)
 class AnimalItem:
+    # One row of the hand-built animal dataset: symbolic properties, the
+    # allowed intermediate functionality labels, and the family label.
     name: str
     properties: Tuple[str, ...]
     functionality: Tuple[str, ...]
@@ -150,6 +169,7 @@ class AnimalItem:
 
 
 class RolloutBuffer:
+    """Short-lived buffer holding the most recent on-policy episode."""
     def __init__(self) -> None:
         # This short-lived buffer stores the most recent episode before its
         # transitions are promoted into the replay memory.
@@ -176,6 +196,7 @@ class RolloutBuffer:
 
 
 class ExperienceReplayBuffer:
+    """Prioritized replay memory used by the finite-difference learner."""
     def __init__(self, capacity: int = 512, alpha: float = 0.6, seed: int = 0) -> None:
         # Prioritized replay keeps high-signal transitions around longer and
         # samples them more often during finite-difference updates.
@@ -190,6 +211,8 @@ class ExperienceReplayBuffer:
         return len(self.data)
 
     def add(self, transition: Transition, priority: float) -> None:
+        # Ring-buffer insertion: once capacity is reached, the oldest replay
+        # slot is overwritten in a cyclic fashion.
         priority = float(max(priority, 1e-8))
         if len(self.data) < self.capacity:
             self.data.append(transition)
@@ -218,6 +241,7 @@ class ExperienceReplayBuffer:
 
 
 class AnimalDataset:
+    """Hand-built animal taxonomy dataset plus optical percept encoding."""
     def __init__(self) -> None:
         # The task is intentionally small and structured: percept properties,
         # intermediate functionality/family clips, then final species actions.
@@ -291,10 +315,14 @@ class AnimalDataset:
         }
 
     def encode_photonic_percept(self, item: AnimalItem) -> Tuple[int, ...]:
+        # Multiple symbolic properties can map to the same optical mode; the
+        # result is the set of active percept modes for that animal.
         active = sorted({self.property_to_mode[name] for name in item.properties if name in self.property_to_mode})
         return tuple(active)
 
     def ground_truth_intermediate(self, item: AnimalItem) -> Tuple[Tuple[int, ...], int]:
+        # The environment gives one final species label, but the agent is also
+        # evaluated on whether its intermediate layers align with the taxonomy.
         func = tuple(self.func2idx[name] for name in item.functionality if name in self.func2idx)
         fam = self.family2idx[item.family]
         return func, fam
@@ -319,6 +347,8 @@ class AnimalDataset:
         priors = [p_to_f, f_to_fam, fam_to_s]
         normed: List[np.ndarray] = []
         for mat in priors:
+            # The optical layer initializer expects row-wise preferences from a
+            # source clip into its likely targets.
             row_sums = mat.sum(axis=1, keepdims=True)
             row_sums = np.where(row_sums <= 1e-12, 1.0, row_sums)
             normed.append(mat / row_sums)
@@ -326,6 +356,7 @@ class AnimalDataset:
 
 
 class AnimalClassificationEnv(BaseEnv):
+    """Single-step animal classification environment over the dataset."""
     def __init__(self, dataset: AnimalDataset, dense_reward_weight: float = 0.15, seed: int = 0) -> None:
         self.dataset = dataset
         self.dense_reward_weight = dense_reward_weight
@@ -333,6 +364,7 @@ class AnimalClassificationEnv(BaseEnv):
         self.current: Optional[AnimalItem] = None
 
     def reset(self) -> Tuple[int, ...]:
+        # Sample a fresh animal and return only its photonic percept encoding.
         self.current = self.rng.choice(self.dataset.animals)
         return self.dataset.encode_photonic_percept(self.current)
 
@@ -359,6 +391,7 @@ class AnimalClassificationEnv(BaseEnv):
 
 
 def bosonic_basis(num_modes: int, max_total_excitation: int) -> List[Tuple[int, ...]]:
+    """Enumerate the truncated bosonic occupation basis up to a photon cap."""
     basis: List[Tuple[int, ...]] = []
 
     def rec(mode: int, remaining: int, prefix: List[int]) -> None:
@@ -377,6 +410,7 @@ def bosonic_basis(num_modes: int, max_total_excitation: int) -> List[Tuple[int, 
 
 
 class BosonicFockSpace:
+    """Truncated multi-mode bosonic Fock space with ladder operators."""
     def __init__(self, num_modes: int, max_total_excitation: int) -> None:
         # A basis element is an occupation-number tuple across all modes.
         self.num_modes = num_modes
@@ -386,6 +420,7 @@ class BosonicFockSpace:
         self.dim = len(self.basis)
 
     def basis_state(self, occ: Tuple[int, ...]) -> np.ndarray:
+        # Standard occupation-number basis ket |n_1, ..., n_m>.
         out = np.zeros((self.dim, 1), dtype=np.complex128)
         out[self.index[tuple(occ)], 0] = 1.0
         return out
@@ -394,6 +429,8 @@ class BosonicFockSpace:
         return self.basis_state(tuple(0 for _ in range(self.num_modes)))
 
     def creation(self, mode: int) -> np.ndarray:
+        # Truncated bosonic creation operator acting within the chosen
+        # total-excitation sector.
         op = np.zeros((self.dim, self.dim), dtype=np.complex128)
         for occ in self.basis:
             n = occ[mode]
@@ -405,6 +442,7 @@ class BosonicFockSpace:
         return op
 
     def annihilation(self, mode: int) -> np.ndarray:
+        # Truncated bosonic annihilation operator matching the same basis.
         op = np.zeros((self.dim, self.dim), dtype=np.complex128)
         for occ in self.basis:
             n = occ[mode]
@@ -416,6 +454,7 @@ class BosonicFockSpace:
 
 
 class SingleModeFockSpace:
+    """Small single-mode oscillator space used for detector ancillas."""
     def __init__(self, cutoff: int) -> None:
         # Detector ancillas use a tiny truncated oscillator rather than the full
         # multi-mode basis used for the photonic memory layers.
@@ -423,6 +462,7 @@ class SingleModeFockSpace:
         self.dim = self.cutoff + 1
 
     def basis_state(self, n: int) -> np.ndarray:
+        # Detector basis ket |n> in the truncated single-mode oscillator.
         out = np.zeros((self.dim, 1), dtype=np.complex128)
         out[int(n), 0] = 1.0
         return out
@@ -594,6 +634,8 @@ class PhotonicQuantumMEPSMemory:
         self._unitary_cache.clear()
 
     def parameter_spec(self) -> List[Tuple[int, str, Tuple[int, ...]]]:
+        # Flatten the trainable Hamiltonian entries into an optimizer-friendly
+        # parameter list while preserving enough metadata to rebuild tensors later.
         spec: List[Tuple[int, str, Tuple[int, ...]]] = []
         for t in range(self.num_layers - 1):
             pair_size = sum(self.pair_sizes[t])
@@ -606,6 +648,7 @@ class PhotonicQuantumMEPSMemory:
         return spec
 
     def get_parameter_vector(self) -> np.ndarray:
+        # Read the currently trainable Hamiltonian entries into a single vector.
         vals: List[float] = []
         for t, name, idx in self.parameter_spec():
             vals.append(float(getattr(self.layer_params[t], name)[idx]))
@@ -620,6 +663,8 @@ class PhotonicQuantumMEPSMemory:
             arr = getattr(self.layer_params[t], name)
             arr[idx] = val
             if len(idx) == 2:
+                # Hopping and density couplings are stored symmetrically, so
+                # updating one triangle entry also updates its mirror.
                 i, j = idx
                 arr[j, i] = val
         self._unitary_cache.clear()
@@ -628,6 +673,8 @@ class PhotonicQuantumMEPSMemory:
         self.set_parameter_vector(self.get_parameter_vector() + np.asarray(delta, dtype=float))
 
     def _pair_hamiltonian(self, transition_idx: int) -> np.ndarray:
+        # Build the exact joint Hamiltonian for one adjacent layer pair plus its
+        # detector ancilla. This is the dynamical core of the architecture.
         params = self.layer_params[transition_idx]
         phot_dim = self.pair_spaces[transition_idx].dim
         det_dim = self.detector_spaces[transition_idx].dim
@@ -650,6 +697,8 @@ class PhotonicQuantumMEPSMemory:
         source_signature = np.zeros((phot_dim, phot_dim), dtype=np.complex128)
         target_signature = np.zeros((phot_dim, phot_dim), dtype=np.complex128)
         for i, weight in enumerate(source_weights):
+            # Source/target "signatures" compress many photonic number operators
+            # into a single collective observable that the detector couples to.
             source_signature += weight * n_ops[i]
         for j, weight in enumerate(target_weights):
             target_signature += weight * n_ops[left_size + j]
@@ -675,6 +724,8 @@ class PhotonicQuantumMEPSMemory:
         return self._unitary_cache[transition_idx]
 
     def _active_photon_count(self, percept_indices: Sequence[int]) -> int:
+        # The percept can mention more active modes than we can afford to
+        # occupy exactly, so we cap the encoded photon count at the global cutoff.
         return max(1, min(len(set(int(x) for x in percept_indices)), self.max_total_excitation))
 
     def initial_layer_state(self, percept_indices: Sequence[int] | int) -> Tuple[np.ndarray, int]:
@@ -734,12 +785,16 @@ class PhotonicQuantumMEPSMemory:
         return proj / prob, prob
 
     def _reduced_detector_state(self, joint_state: np.ndarray, transition_idx: int) -> np.ndarray:
+        # Partial trace over the photonic pair leaves only the detector density
+        # matrix for this transition.
         phot_dim = self.pair_spaces[transition_idx].dim
         det_dim = self.detector_spaces[transition_idx].dim
         reshaped = joint_state.reshape(phot_dim, det_dim, phot_dim, det_dim)
         return np.trace(reshaped, axis1=0, axis2=2)
 
     def _detector_basis_projector(self, transition_idx: int, detector_state: int) -> np.ndarray:
+        # Lift a detector basis projector into the full joint space by tensoring
+        # it with identity on the photonic degrees of freedom.
         phot_dim = self.pair_spaces[transition_idx].dim
         detector_ket = self.detector_spaces[transition_idx].basis_state(detector_state)
         detector_proj = detector_ket @ dagger(detector_ket)
@@ -763,10 +818,14 @@ class PhotonicQuantumMEPSMemory:
                 "probabilities": {},
             }
 
+        # Each requested detector basis state becomes a projector on the full
+        # joint space by tensoring detector basis projectors with photonic identity.
         projectors = {state: self._detector_basis_projector(transition_idx, state) for state in selected_states}
         probabilities: Dict[int, float] = {}
         for state, projector in projectors.items():
             probabilities[state] = float(np.real(np.trace(projector @ joint_state)))
+        # Any probability mass not assigned to an explicitly requested detector
+        # basis state is bundled into a single "other" branch with outcome -1.
         residual_prob = max(0.0, 1.0 - sum(probabilities.values()))
 
         outcomes: List[int] = list(selected_states)
@@ -774,6 +833,8 @@ class PhotonicQuantumMEPSMemory:
         combined_proj = np.zeros_like(joint_state)
         for projector in projectors.values():
             combined_proj += projector
+        # The complement collects all detector outcomes that were not explicitly
+        # requested in measurement_states.
         complement_proj = np.eye(joint_state.shape[0], dtype=np.complex128) - combined_proj
         if residual_prob > 1e-12:
             outcomes.append(-1)
@@ -835,6 +896,8 @@ class PhotonicQuantumMEPSMemory:
         phot_dim = pair_space.dim
         det_dim = self.detector_spaces[transition_idx].dim
         reshaped = joint_state.reshape(phot_dim, det_dim, phot_dim, det_dim)
+        # Trace away the detector first, then map pair-basis occupations back to
+        # the chosen layer by discarding any population on the inactive side.
         pair_dm = np.trace(reshaped, axis1=1, axis2=3)
         for occ_a, idx_a in pair_space.index.items():
             left_occ_a = occ_a[:left_size]
@@ -868,6 +931,8 @@ class PhotonicQuantumMEPSMemory:
         return out / trace_out
 
     def _pair_output_projector(self, transition_idx: int, side: str, photon_count: int) -> np.ndarray:
+        # This cached projector picks out the subspace where all encoded photons
+        # live entirely in the chosen side of the pair space.
         key = (transition_idx, side, photon_count)
         if key in self._pair_projector_cache:
             return self._pair_projector_cache[key]
@@ -897,6 +962,9 @@ class PhotonicQuantumMEPSMemory:
         # This is the central MEPS deliberation loop: propagate layer by layer,
         # optionally measure detectors mid-circuit, and keep a full record of
         # reduced layer states and detector states.
+        # `layer_state` always denotes "where the agent currently is" in the
+        # layered memory, while `photon_count` fixes which total-excitation
+        # sector the whole deliberation stays inside.
         layer_state, photon_count = self.initial_layer_state(percept)
         propagation_probs: List[float] = []
         layer_states: List[np.ndarray] = []
@@ -910,19 +978,43 @@ class PhotonicQuantumMEPSMemory:
         measurement_records: List[Dict[str, Any]] = []
 
         for t in range(self.num_layers - 1):
+            # Step 1:
+            # Take the reduced state on layer t and place it into the full
+            # layer-pair space (layer t + layer t+1) with all population on the
+            # source/left side.
+            # Start each transition by embedding the current single-layer state
+            # into the left half of the pair Hilbert space for this layer pair.
             pair_dm = self._embed_layer_state_into_pair(layer_state, t, side="left")
+            # Step 2:
+            # Attach the which-way detector ancilla for this transition. From
+            # this point onward we evolve a joint photonic-detector state.
+            # The detector ancilla is attached in vacuum before the joint
+            # photonic-detector Hamiltonian is applied.
             joint_state = self._joint_with_detector_vacuum(pair_dm, t)
+            # Step 3:
+            # Apply the unitary generated by the transition Hamiltonian. This is
+            # where photonic hopping, onsite terms, and detector coupling act.
             U = self._pair_unitary(t)
             joint_state = U @ joint_state @ dagger(U)
 
             success_prob = 0.0
             for _ in range(max_projection_rounds):
+                # Step 4:
+                # Try the MEPS post-selection step. If successful, the state is
+                # renormalized onto the branch where all photons reached the
+                # output/right side of this transition.
+                # Success means all photons are found on the right/output side
+                # of the current pair, which is the MEPS-style handoff to the
+                # next semantic layer.
                 pair_proj, success_prob = self._project_joint_state(joint_state, t, side="right", photon_count=photon_count)
                 if success_prob > 1e-15:
                     joint_state = pair_proj
                     break
 
             if conditional_project and success_prob <= 1e-15:
+                # When the explicit success projection has essentially zero
+                # weight, we still attempt a conditional right-side projection so
+                # deliberation can continue with a normalized downstream state.
                 P_pair = self._pair_output_projector(t, "right", photon_count)
                 P = np.kron(P_pair, np.eye(self.detector_spaces[t].dim, dtype=np.complex128))
                 proj = P @ joint_state @ P
@@ -936,6 +1028,13 @@ class PhotonicQuantumMEPSMemory:
                 and (measurement_config.max_measurements is None or measurements_done < measurement_config.max_measurements)
             )
             if should_measure:
+                # Step 5:
+                # Optionally interrogate the detector before moving on. This is
+                # the point where sampled trajectories and deterministic
+                # non-selective evolution diverge.
+                # Mid-circuit detector measurement modifies the joint state in
+                # place, either by sampled collapse or by a non-selective Lüders
+                # channel depending on sample_measurements.
                 joint_state, record = self._mid_circuit_measure_detector(
                     joint_state,
                     t,
@@ -945,6 +1044,13 @@ class PhotonicQuantumMEPSMemory:
                 measurement_records.append(record)
                 measurements_done += 1
 
+            # Step 6:
+            # Save diagnostics from the joint state, then trace down to the
+            # right/output layer only. That reduced state becomes the source
+            # state for the next loop iteration.
+            # Keep both the reduced detector state and the reduced right-side
+            # layer state so diagnostics and later taxonomy readout can inspect
+            # every stage of the cascade.
             detector_states.append(self._reduced_detector_state(joint_state, t))
             layer_state = self._extract_layer_state_from_joint(joint_state, t, side="right")
             joint_states.append(joint_state.copy())
@@ -986,6 +1092,8 @@ class PhotonicQuantumMEPSMemory:
         detector_measurement: Optional[DetectorMeasurementConfig] = None,
         sample_measurements: bool = True,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        # The species action space is the final layer, so action scores are just
+        # expected occupations of the terminal photonic modes.
         final_state, info = self.deliberate_state(
             percept,
             detector_measurement=detector_measurement,
@@ -1001,6 +1109,8 @@ class PhotonicQuantumMEPSMemory:
         detector_measurement: Optional[DetectorMeasurementConfig] = None,
         sample_measurements: bool = True,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        # Occupation expectations become a stochastic policy through a softmax;
+        # temperature controls how sharply the most excited mode is favored.
         raw, info = self.action_expectations(
             percept,
             detector_measurement=detector_measurement,
@@ -1018,6 +1128,8 @@ class PhotonicQuantumMEPSMemory:
         detector_measurement: Optional[DetectorMeasurementConfig] = None,
         sample_measurements: bool = True,
     ) -> Dict[str, int]:
+        # Because the architecture mirrors the taxonomy hierarchy, each
+        # intermediate layer can be decoded directly into its semantic label.
         _, info = self.deliberate_state(
             percept,
             detector_measurement=detector_measurement,
@@ -1036,6 +1148,7 @@ class PhotonicQuantumMEPSMemory:
 
 
 class QuantumFisher:
+    """Utilities for density-derivative-based quantum Fisher information."""
     @staticmethod
     def density_derivatives(memory: PhotonicQuantumMEPSMemory, percept: Sequence[int] | int, eps: float = 1e-5) -> List[np.ndarray]:
         # Central finite differences are used on the final reduced density
@@ -1062,17 +1175,23 @@ class QuantumFisher:
         # Symmetric logarithmic derivative formula evaluated in the eigenbasis of rho.
         evals, evecs = eigh(rho)
         evals = np.real(evals)
+        # Terms with lambda_i + lambda_j ~ 0 lie outside the support of rho and
+        # are excluded from the SLD weight matrix.
         denom = evals[:, None] + evals[None, :]
         weight = np.zeros_like(denom, dtype=float)
         mask = denom > eps
         weight[mask] = 2.0 / denom[mask]
         vdag = dagger(evecs)
+        # Rotating each derivative once into the eigenbasis makes the later
+        # Fisher contractions a simple weighted elementwise sum.
         mats = [vdag @ drho @ evecs for drho in drhos]
         npar = len(mats)
         F = np.zeros((npar, npar), dtype=float)
         weighted_rev = [weight * M.T for M in mats]
         for i in range(npar):
             for j in range(i, npar):
+                # This is the standard eigenbasis expression for F_ij using the
+                # SLD-induced weights above.
                 fij = float(np.real(np.sum(mats[i] * weighted_rev[j])))
                 F[i, j] = fij
                 F[j, i] = fij
@@ -1080,12 +1199,16 @@ class QuantumFisher:
 
     @staticmethod
     def qfim(memory: PhotonicQuantumMEPSMemory, percept: Sequence[int] | int, deriv_eps: float = 1e-5) -> np.ndarray:
+        # Convenience wrapper: build the reduced density state, differentiate it
+        # with respect to all trainable parameters, then assemble the QFIM.
         rho = memory.density(percept)
         drhos = QuantumFisher.density_derivatives(memory, percept, eps=deriv_eps)
         return QuantumFisher.from_density_derivatives(rho, drhos)
 
     @staticmethod
     def natural_gradient(grad: np.ndarray, F: np.ndarray, reg: float = 1e-4) -> np.ndarray:
+        # Small Tikhonov regularization keeps the linear solve stable when the
+        # empirical Fisher matrix is ill-conditioned or nearly singular.
         return np.linalg.solve(F + reg * np.eye(F.shape[0]), grad)
 
 
@@ -1093,6 +1216,7 @@ class QuantumFisher:
 
 
 def matrix_sqrt_psd(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Compute the positive-semidefinite square root of a Hermitian matrix."""
     # Positive-semidefinite matrix square root for fidelity/Bures calculations.
     evals, evecs = eigh(0.5 * (x + dagger(x)))
     evals = np.clip(np.real(evals), 0.0, None)
@@ -1100,27 +1224,37 @@ def matrix_sqrt_psd(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 
 def von_neumann_entropy(rho: np.ndarray, eps: float = 1e-12) -> float:
+    """Return the von Neumann entropy of a density matrix."""
+    # Entropy of a density matrix, computed from its symmetrized eigenvalues.
     evals = np.linalg.eigvalsh(0.5 * (rho + dagger(rho)))
     evals = np.clip(np.real(evals), eps, None)
     return float(-np.sum(evals * np.log(evals)))
 
 
 def purity(rho: np.ndarray) -> float:
+    """Return Tr(rho^2), a simple mixedness diagnostic."""
+    # Purity equals 1 for pure states and decreases as the state becomes mixed.
     return float(np.real(np.trace(rho @ rho)))
 
 
 def trace_distance(rho: np.ndarray, sigma: np.ndarray) -> float:
+    """Return the trace distance between two density matrices."""
+    # Trace distance acts as the main distinguishability measure for detector states.
     diff = rho - sigma
     svals = np.linalg.svd(diff, compute_uv=False)
     return float(0.5 * np.sum(np.abs(svals)))
 
 
 def hilbert_schmidt_distance(rho: np.ndarray, sigma: np.ndarray) -> float:
+    """Return the Hilbert-Schmidt distance between two states."""
+    # Frobenius-style distance between density matrices.
     diff = rho - sigma
     return float(np.real(np.trace(diff @ diff)))
 
 
 def fidelity(rho: np.ndarray, sigma: np.ndarray) -> float:
+    """Return the Uhlmann fidelity between two density matrices."""
+    # Uhlmann fidelity implemented through matrix square roots.
     sqrt_rho = matrix_sqrt_psd(rho)
     inner = sqrt_rho @ sigma @ sqrt_rho
     sqrt_inner = matrix_sqrt_psd(inner)
@@ -1128,21 +1262,29 @@ def fidelity(rho: np.ndarray, sigma: np.ndarray) -> float:
 
 
 def bures_distance(rho: np.ndarray, sigma: np.ndarray) -> float:
+    """Return the Bures distance induced by state fidelity."""
+    # Metric induced by fidelity; often used as a geometric state distance.
     fid = min(max(fidelity(rho, sigma), 0.0), 1.0)
     return float(np.sqrt(max(0.0, 2.0 * (1.0 - np.sqrt(fid)))))
 
 
 def quantum_jensen_shannon_divergence(rho: np.ndarray, sigma: np.ndarray) -> float:
+    """Return the quantum Jensen-Shannon divergence of two states."""
+    # Symmetric entropy-based divergence between quantum states.
     mix = 0.5 * (rho + sigma)
     return float(von_neumann_entropy(mix) - 0.5 * von_neumann_entropy(rho) - 0.5 * von_neumann_entropy(sigma))
 
 
 def l1_coherence(rho: np.ndarray) -> float:
+    """Return basis-dependent l1 coherence from off-diagonal magnitude."""
+    # Basis-dependent coherence: total magnitude of off-diagonal matrix entries.
     off_diag = rho - np.diag(np.diag(rho))
     return float(np.sum(np.abs(off_diag)))
 
 
 def normalized_l1_coherence(rho: np.ndarray) -> float:
+    """Return l1 coherence normalized by Hilbert-space dimension."""
+    # Rescale l1 coherence so values are easier to compare across dimensions.
     dim = rho.shape[0]
     if dim <= 1:
         return 0.0
@@ -1153,6 +1295,9 @@ def normalized_l1_coherence(rho: np.ndarray) -> float:
 
 
 def transition_hopping_matrix(memory: PhotonicQuantumMEPSMemory, transition_idx: int) -> np.ndarray:
+    """Extract the rectangular inter-layer hopping block for one transition."""
+    # Extract just the left-to-right rectangular hopping block from the full
+    # symmetric pair Hamiltonian matrix.
     left_size, right_size = memory.pair_sizes[transition_idx]
     out = np.zeros((left_size, right_size), dtype=float)
     for i, j in memory._supported_pairs(transition_idx):
@@ -1161,6 +1306,7 @@ def transition_hopping_matrix(memory: PhotonicQuantumMEPSMemory, transition_idx:
 
 
 def hypergraph_cardinality_stats(incidence: np.ndarray, axis: int, threshold: float = 1e-12) -> Dict[str, float]:
+    # Cardinality summary for hyperedges induced by non-negligible couplings.
     mask = np.abs(incidence) > threshold
     card = mask.sum(axis=axis)
     return {
@@ -1182,10 +1328,13 @@ def weighted_bipartite_adjacency(h: np.ndarray) -> np.ndarray:
 
 
 def support_adjacency(h: np.ndarray, threshold: float = 1e-12) -> np.ndarray:
+    # Structural graph quantities use the support graph so tiny learned weights
+    # do not create misleading edges.
     return (weighted_bipartite_adjacency(h) > threshold).astype(float)
 
 
 def graph_components(adjacency: np.ndarray) -> List[List[int]]:
+    # Breadth-first connected-component extraction for the support graph.
     n = adjacency.shape[0]
     seen = np.zeros(n, dtype=bool)
     components: List[List[int]] = []
@@ -1236,6 +1385,7 @@ def all_pairs_shortest_paths(adjacency: np.ndarray) -> Tuple[np.ndarray, Dict[Tu
 
 
 def degree_centrality(adjacency: np.ndarray) -> np.ndarray:
+    # Fraction of possible neighbors each node is connected to.
     n = adjacency.shape[0]
     if n <= 1:
         return np.zeros(n, dtype=float)
@@ -1243,6 +1393,7 @@ def degree_centrality(adjacency: np.ndarray) -> np.ndarray:
 
 
 def closeness_centrality(adjacency: np.ndarray) -> np.ndarray:
+    # Inverse average graph distance from each node to the nodes it can reach.
     dists, _ = all_pairs_shortest_paths(adjacency)
     n = adjacency.shape[0]
     out = np.zeros(n, dtype=float)
@@ -1254,6 +1405,7 @@ def closeness_centrality(adjacency: np.ndarray) -> np.ndarray:
 
 
 def betweenness_centrality(adjacency: np.ndarray) -> np.ndarray:
+    # Brandes-style accumulation on the support graph.
     n = adjacency.shape[0]
     bc = np.zeros(n, dtype=float)
     for s in range(n):
@@ -1289,6 +1441,8 @@ def betweenness_centrality(adjacency: np.ndarray) -> np.ndarray:
 
 
 def eigenvector_centrality(weighted_adjacency: np.ndarray, iters: int = 200, tol: float = 1e-10) -> np.ndarray:
+    # Power iteration is sufficient here because these graphs are small and we
+    # only need a simple centrality summary rather than a full eigensolver setup.
     n = weighted_adjacency.shape[0]
     x = np.ones(n, dtype=float) / max(n, 1)
     for _ in range(iters):
@@ -1304,6 +1458,8 @@ def eigenvector_centrality(weighted_adjacency: np.ndarray, iters: int = 200, tol
 
 
 def cheeger_constant_sweep(weighted_adjacency: np.ndarray) -> Dict[str, float]:
+    # We estimate the Cheeger constant by sweeping threshold cuts induced by the
+    # Fiedler vector, and report the standard spectral lower/upper bounds too.
     n = weighted_adjacency.shape[0]
     if n <= 1:
         return {"cheeger_estimate": 0.0, "cheeger_lower_bound": 0.0, "cheeger_upper_bound": 0.0}
@@ -1337,6 +1493,7 @@ def cheeger_constant_sweep(weighted_adjacency: np.ndarray) -> Dict[str, float]:
 
 
 def mean_path_jaccard_similarity(paths: Dict[Tuple[int, int], Tuple[int, ...]], n: int) -> float:
+    # Heuristic path-overlap score for the support graph.
     sims: List[float] = []
     for i in range(n):
         for j in range(i + 1, n):
@@ -1352,6 +1509,7 @@ def mean_path_jaccard_similarity(paths: Dict[Tuple[int, int], Tuple[int, ...]], 
 
 
 def path_length_similarity(dists: np.ndarray) -> float:
+    # Higher values mean the finite shortest-path lengths are more uniform.
     finite = dists[np.isfinite(dists) & (dists > 0)]
     if finite.size <= 1:
         return 1.0
@@ -1359,6 +1517,8 @@ def path_length_similarity(dists: np.ndarray) -> float:
 
 
 def simplicial_complex_from_hyperedges(hyperedges: Sequence[Sequence[int]], max_dim: int = 2) -> Dict[int, List[Tuple[int, ...]]]:
+    # Every hyperedge contributes all of its faces, yielding the simplicial
+    # complex used for Betti-number calculations.
     simplices: Dict[int, set[Tuple[int, ...]]] = {k: set() for k in range(max_dim + 1)}
     for edge in hyperedges:
         edge = tuple(sorted(set(int(v) for v in edge)))
@@ -1369,6 +1529,7 @@ def simplicial_complex_from_hyperedges(hyperedges: Sequence[Sequence[int]], max_
 
 
 def boundary_rank_mod2(domain: List[Tuple[int, ...]], codomain: List[Tuple[int, ...]]) -> int:
+    # Rank of the simplicial boundary map over Z2.
     if not domain or not codomain:
         return 0
     codomain_index = {simplex: i for i, simplex in enumerate(codomain)}
@@ -1381,6 +1542,7 @@ def boundary_rank_mod2(domain: List[Tuple[int, ...]], codomain: List[Tuple[int, 
 
 
 def rank_mod2(mat: np.ndarray) -> int:
+    # Gaussian elimination over Z2 for boundary operators in simplicial homology.
     mat = np.array(mat, dtype=np.uint8, copy=True)
     rows, cols = mat.shape
     rank = 0
@@ -1428,6 +1590,7 @@ def simplicial_homology_summary(hyperedges: Sequence[Sequence[int]], max_dim: in
 
 
 def compute_graph_hypergraph_properties(memory: PhotonicQuantumMEPSMemory, threshold: float = 1e-12) -> Dict[str, Any]:
+    """Compute graph, hypergraph, and topological summaries from learned couplings."""
     transitions: List[Dict[str, Any]] = []
     for t in range(memory.num_layers - 1):
         # Every adjacent layer pair contributes one weighted bipartite graph and
@@ -1450,6 +1613,8 @@ def compute_graph_hypergraph_properties(memory: PhotonicQuantumMEPSMemory, thres
         weights = np.abs(h[mask])
         weight_probs = weights / np.sum(weights) if weights.size and np.sum(weights) > threshold else np.array([], dtype=float)
         weight_entropy = float(-np.sum(weight_probs * np.log(weight_probs))) if weight_probs.size else 0.0
+        # The shortest-path metrics are computed only on the binary support
+        # graph, because they are intended as structural rather than weighted statistics.
         dists, paths = all_pairs_shortest_paths(support)
         finite = dists[np.isfinite(dists) & (dists > 0)]
         components = graph_components(support)
@@ -1457,6 +1622,8 @@ def compute_graph_hypergraph_properties(memory: PhotonicQuantumMEPSMemory, thres
         right_hyperedges = [tuple(np.flatnonzero(mask[:, j])) for j in range(mask.shape[1]) if np.any(mask[:, j])]
         left_homology = simplicial_homology_summary(left_hyperedges, max_dim=2)
         right_homology = simplicial_homology_summary(right_hyperedges, max_dim=2)
+        # Centrality/path quantities are computed on the bipartite support graph,
+        # while the homology summaries are computed on the induced hypergraphs.
         degree_cent = degree_centrality(support)
         closeness_cent = closeness_centrality(support)
         betweenness_cent = betweenness_centrality(support)
@@ -1502,14 +1669,19 @@ def compute_wave_particle_quantities(
     dataset: AnimalDataset,
     detector_measurement: Optional[DetectorMeasurementConfig] = None,
 ) -> Dict[str, Any]:
+    """Estimate wave-particle diagnostics from reduced photonic and detector states."""
     # Wave-like behaviour is proxied by photonic coherence, while particle-like
     # which-way information is proxied by detector distinguishability.
     per_layer: List[Dict[str, float]] = []
     all_samples: List[List[Dict[str, float]]] = [[] for _ in range(memory.num_layers - 1)]
     for item in dataset.animals:
         percept = dataset.encode_photonic_percept(item)
+        # We average duality quantities over the whole animal catalogue so the
+        # reported values describe the trained architecture rather than one sample.
         _, info = memory.deliberate_state(percept, detector_measurement=detector_measurement)
         for layer in range(memory.num_layers - 1):
+            # For each transition layer we compare the reduced detector state to
+            # vacuum and the reduced photonic state to coherence/purity measures.
             phot_state = info["layer_states"][layer]
             det_state = info["detector_states"][layer]
             det_vacuum = ket_to_dm(memory.detector_spaces[layer].vacuum_state())
@@ -1549,7 +1721,10 @@ def compute_wave_particle_quantities(
 
 
 class PhotonicAnimalAgent:
+    """Learning wrapper around the photonic memory and replay-based updates."""
     def __init__(self, name: str, memory: PhotonicQuantumMEPSMemory, learning: Optional[LearningConfig] = None, seed: int = 0) -> None:
+        # The agent is intentionally thin: most physics lives in `memory`, while
+        # this wrapper handles policy sampling, replay, and parameter updates.
         self.name = name
         self.memory = memory
         self.learning = learning or LearningConfig()
@@ -1571,6 +1746,8 @@ class PhotonicAnimalAgent:
         )
 
     def encode_percept(self, percept: Any) -> Tuple[int, ...]:
+        # Normalize various environment return types into the tuple form
+        # expected by the photonic memory.
         if isinstance(percept, np.ndarray):
             return tuple(int(x) for x in np.flatnonzero(percept > 0.5))
         if isinstance(percept, (list, tuple)):
@@ -1591,6 +1768,8 @@ class PhotonicAnimalAgent:
         log_prob = float(math.log(max(probs[action], 1e-12)))
         entropy = float(-np.sum(probs * safe_log(probs)))
         preds = self.memory.taxonomy_predictions(key, detector_measurement=self.detector_measurement)
+        # Detector occupations provide an interpretable scalar summary of how
+        # much which-way information each ancilla acquired during deliberation.
         detector_occupations = [
             float(np.real(np.trace(dm @ self.memory.detector_n_ops[idx])))
             for idx, dm in enumerate(info.get("detector_states", []))
@@ -1609,6 +1788,8 @@ class PhotonicAnimalAgent:
         return action, info
 
     def observe(self, reward: float, done: bool, action: int, info: Dict[str, Any]) -> None:
+        # We store the policy snapshot that generated the action so the later
+        # variational target can compare current and historical behavior.
         self.episode_buffer.append(Transition(
             percept=tuple(info["encoded_percept"]),
             action=int(action),
@@ -1646,8 +1827,12 @@ class PhotonicAnimalAgent:
         for tr, ret, weight in zip(transitions, returns, sample_weights):
             probs = self._policy_only(tr.percept)
             oldp = tr.policy[tr.action]
+            # The replayed action probability is nudged toward uniformity by the
+            # forgetting term and toward rewarding outcomes by the return term.
             target = oldp - cfg.forgetting * (oldp - 1.0 / len(probs)) + cfg.return_scale * ret
             target = float(np.clip(target, 0.0, 1.0))
+            # This gives a simple variational surrogate: match the desired
+            # action probability while preserving some entropy.
             total += weight * 0.5 * (probs[tr.action] - target) ** 2
             total -= weight * cfg.entropy_bonus * float(-np.sum(probs * safe_log(probs)))
         return float(total / max(norm, 1e-12))
@@ -1665,6 +1850,8 @@ class PhotonicAnimalAgent:
         grad = np.zeros_like(theta0)
         base = self.memory.copy_params()
         for k in range(len(theta0)):
+            # Reuse the same replay batch for every coordinate so gradient noise
+            # comes only from the finite-difference approximation itself.
             tp = theta0.copy()
             tm = theta0.copy()
             tp[k] += cfg.fd_eps
@@ -1682,6 +1869,8 @@ class PhotonicAnimalAgent:
         G = 0.0
         for i in reversed(range(len(transitions))):
             if transitions[i].done:
+                # Replay can mix episodes, so "done" marks where discounted
+                # return accumulation should restart.
                 G = 0.0
             G = transitions[i].reward + gamma * G
             out[i] = G
@@ -1691,6 +1880,8 @@ class PhotonicAnimalAgent:
         if len(self.episode_buffer) == 0:
             return {"policy_loss": 0.0, "qfim_trace": 0.0, "avg_return": 0.0}
         cfg = self.learning
+        # First compute discounted returns for the most recent on-policy
+        # episode, because those returns determine replay priorities.
         episode_returns = self.episode_buffer.discounted_returns(cfg.gamma)
         for tr, ret in zip(self.episode_buffer.data, episode_returns):
             # Reward and entropy both contribute to replay priority so rare but
@@ -1698,19 +1889,30 @@ class PhotonicAnimalAgent:
             priority = abs(float(ret)) + float(tr.entropy) + 1e-6
             self.replay.add(tr, priority=priority)
 
+        # Next choose which data will define this update step:
+        # prioritized replay if available, otherwise the fresh episode buffer.
         replay_batch, replay_weights = self.replay.sample(cfg.replay_batch_size)
         if replay_batch:
+            # Once enough experience is stored, learning is driven by a
+            # prioritized replay batch instead of only the latest episode.
             transitions = replay_batch
             returns = self._returns_from_transitions(transitions, cfg.gamma)
             sample_weights = replay_weights
         else:
+            # Early updates fall back to the current episode before replay has
+            # enough items to sample meaningfully.
             transitions = list(self.episode_buffer.data)
             returns = episode_returns
             sample_weights = np.ones(len(transitions), dtype=float)
 
+        # The objective gradient is estimated by central finite differences on
+        # the current parameter vector, always against the same sampled batch.
         grad = self._finite_difference_gradient(transitions, returns, sample_weights)
         qfim_trace = 0.0
         if cfg.learning_mode == "qfim":
+            # In QFIM mode, convert the Euclidean gradient into a natural
+            # gradient by averaging a Fisher matrix over the percepts present in
+            # the sampled update batch.
             # QFIM is averaged over the percepts in the sampled update batch and
             # used as a natural-gradient preconditioner.
             unique_percepts = sorted(set(tr.percept for tr in transitions))
@@ -1719,11 +1921,18 @@ class PhotonicAnimalAgent:
             qfim_trace = float(np.trace(F))
             step = QuantumFisher.natural_gradient(grad, F, reg=cfg.qfim_reg)
         else:
+            # In variational mode we use the raw finite-difference gradient.
             step = grad
+        # Apply the parameter update, then re-evaluate the surrogate objective
+        # for reporting with the post-update memory parameters.
         self.memory.apply_update(-cfg.lr_policy * step)
         policy_loss = float(self._variational_objective(transitions, returns, sample_weights))
+        # Slowly decay the return scaling term so early reward shaping does not
+        # dominate once the policy becomes more structured.
         cfg.return_scale = max(cfg.return_scale_min, cfg.return_scale * cfg.return_scale_decay)
         avg_return = float(np.mean(episode_returns)) if len(episode_returns) else 0.0
+        # Clear the on-policy episode buffer; replay has already retained the
+        # transitions we want to keep for future updates.
         self.episode_buffer.clear()
         return {
             "policy_loss": policy_loss,
@@ -1742,11 +1951,14 @@ def plot_training_results(
     output_path: Optional[str] = None,
     show_plot: bool = False,
 ) -> Optional[str]:
+    """Render the aggregated training, detector, and coupling diagnostics."""
     try:
         import matplotlib.pyplot as plt
     except Exception:
         return None
 
+    # All plots consume aggregated histories, so a single-run experiment simply
+    # appears as mean with zero standard deviation.
     history_mean = result.get("history_mean", {})
     history_std = result.get("history_std", {})
     rewards = np.asarray(history_mean.get("reward", []), dtype=float)
@@ -1764,6 +1976,10 @@ def plot_training_results(
     priors = dataset.transition_priors()
 
     # Plots use run-averaged trajectories so variability across seeds is visible.
+    # Layout:
+    # 1. training curves
+    # 2. prior-vs-learned transition maps
+    # 3. detector occupation and mid-circuit measurement summaries
     fig, axes = plt.subplots(3, 3, figsize=(16, 11))
     ax = axes[0, 0]
     if rewards.size:
@@ -1801,6 +2017,8 @@ def plot_training_results(
     for idx in range(3):
         ax = axes[1, idx]
         learned = np.asarray(result.get("learned_hopping_mean", [np.zeros_like(priors[idx])])[idx], dtype=float)
+        # Stacking prior over learned weights makes it easy to compare what the
+        # task bias suggested against what training ultimately reinforced.
         combined = np.concatenate([priors[idx], learned], axis=0)
         im = ax.imshow(combined, aspect="auto", cmap="viridis")
         ax.set_title(f"Transition {idx} Prior/Learned")
@@ -1867,6 +2085,9 @@ def build_photonic_animal_agent(
     coupling_radius: int = 0,
     detector_measurement: Optional[DetectorMeasurementConfig] = None,
 ) -> Tuple[AnimalDataset, PhotonicAnimalAgent]:
+    """Assemble a dataset plus a compatible photonic agent instance."""
+    # One convenience constructor that assembles the dataset, the layered
+    # photonic memory, and the learning wrapper with compatible dimensions.
     dataset = AnimalDataset()
     layer_specs = [
         QMEPSLayerSpec("percept", len(dataset.photonic_percept_modes)),
@@ -1896,6 +2117,7 @@ def evaluate_agent(
     episodes: int = 6,
     seed: int = 0,
 ) -> Dict[str, float]:
+    """Run evaluation episodes without updating the agent parameters."""
     # Evaluation reuses the current policy and detector settings, but does not
     # perform any parameter updates.
     env = AnimalClassificationEnv(dataset, dense_reward_weight=0.0, seed=seed)
@@ -1904,6 +2126,7 @@ def evaluate_agent(
     family_correct = 0
     measurement_heatmap = np.zeros((agent.memory.detector_cutoff + 1, agent.memory.num_layers - 1), dtype=float)
     for _ in range(episodes):
+        # Mirror the training interaction flow, but with learning disabled.
         obs = env.reset()
         action, info = agent.act(obs)
         _, reward, _, env_info = env.step(action)
@@ -1933,6 +2156,7 @@ def run_training(
     coupling_radius: int = 0,
     detector_measurement: Optional[DetectorMeasurementConfig] = None,
 ) -> Dict[str, Any]:
+    """Execute one training run and collect metrics, analysis, and diagnostics."""
     # Single-run training entry point. Multi-run aggregation is handled by
     # run_experiment_suite further below.
     dataset, agent = build_photonic_animal_agent(
@@ -1961,6 +2185,8 @@ def run_training(
     family_correct = 0
 
     for _ in range(episodes):
+        # Each episode is a single classification trial in this environment:
+        # sample one animal, deliberate once, act once, then learn.
         obs = env.reset()
         action, act_info = agent.act(obs)
         _, reward, done, env_info = env.step(action)
@@ -1976,6 +2202,8 @@ def run_training(
         func_correct += int(func_ok)
         family_correct += int(family_ok)
         agent.observe(total_reward, done, action, act_info)
+        # This implementation updates after every episode because the
+        # environment is one-step, so "online" and "episodic" coincide.
         diag = agent.update()
         diagnostics.append(diag)
         returns.append(total_reward)
@@ -1991,6 +2219,8 @@ def run_training(
             outcome = record.get("outcome")
             layer = record.get("layer")
             if isinstance(outcome, int) and outcome >= 0 and layer is not None:
+                # The heatmap records empirical detector outcomes:
+                # column = layer, row = detector basis state.
                 measurement_heatmap[outcome, int(layer)] += 1.0
 
     evaluation = evaluate_agent(agent, dataset, episodes=eval_episodes, seed=seed + 31)
@@ -2022,6 +2252,8 @@ def run_training(
 
 
 def _stack_numeric_dicts(dicts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Recursively convert nested numeric dictionaries into mean/std summaries."""
+    # Recursive mean/std reduction for nested numeric result dictionaries.
     if not dicts:
         return {}
     out: Dict[str, Any] = {}
@@ -2029,11 +2261,14 @@ def _stack_numeric_dicts(dicts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     for key in keys:
         vals = [d[key] for d in dicts]
         if isinstance(vals[0], dict):
+            # Preserve the nested report structure while aggregating leaves.
             out[key] = _stack_numeric_dicts(vals)
         elif isinstance(vals[0], np.ndarray):
+            # Array-valued leaves become elementwise mean/std tensors.
             arr = np.asarray(vals, dtype=float)
             out[key] = {"mean": np.mean(arr, axis=0), "std": np.std(arr, axis=0)}
         elif isinstance(vals[0], (int, float, np.floating)):
+            # Scalar leaves become the usual aggregate summary statistics.
             arr = np.asarray(vals, dtype=float)
             out[key] = {"mean": float(np.mean(arr)), "std": float(np.std(arr))}
         else:
@@ -2042,6 +2277,7 @@ def _stack_numeric_dicts(dicts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def aggregate_run_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate multiple seeded runs into the report structure used downstream."""
     # Aggregate per-seed histories and derived quantities into mean/std summaries
     # used by the plots and CLI output.
     if not results:
@@ -2054,6 +2290,7 @@ def aggregate_run_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     history_mean: Dict[str, Any] = {}
     history_std: Dict[str, Any] = {}
     for key in history_keys:
+        # Histories are aligned episode-by-episode across runs, so we aggregate them pointwise.
         arr = np.asarray([res["history"][key] for res in results], dtype=float)
         history_mean[key] = np.mean(arr, axis=0)
         history_std[key] = np.std(arr, axis=0)
@@ -2062,15 +2299,20 @@ def aggregate_run_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     learned_hopping_mean: List[np.ndarray] = []
     for t in range(representative_agent.memory.num_layers - 1):
         mats = np.asarray([transition_hopping_matrix(res["agent"].memory, t) for res in results], dtype=float)
+        # We keep the averaged learned hopping matrices so the visualization can
+        # show a representative trained connectivity pattern.
         learned_hopping_mean.append(np.mean(mats, axis=0))
 
     graph_summary = []
     for t in range(representative_agent.memory.num_layers - 1):
+        # Graph-theoretic summaries preserve the per-transition structure, but
+        # every numeric leaf is turned into mean/std across runs.
         per_transition = [res["graph_properties"]["transitions"][t] for res in results]
         graph_summary.append(_stack_numeric_dicts(per_transition))
 
     duality_summary = []
     for layer in range(representative_agent.memory.num_layers - 1):
+        # Wave-particle quantities are aggregated layer by layer for the same reason.
         per_layer = [res["duality_quantities"]["per_layer"][layer] for res in results]
         duality_summary.append(_stack_numeric_dicts(per_layer))
 
@@ -2084,6 +2326,7 @@ def aggregate_run_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         sample0 = results[0]["evaluation"][key]
         vals = np.asarray([res["evaluation"][key] for res in results], dtype=float)
         if isinstance(sample0, np.ndarray):
+            # Array-valued metrics, such as heatmaps, are averaged entry by entry.
             evaluation_summary[key] = {"mean": np.mean(vals, axis=0), "std": np.std(vals, axis=0)}
         else:
             evaluation_summary[key] = {"mean": float(np.mean(vals)), "std": float(np.std(vals))}
@@ -2123,7 +2366,9 @@ def run_experiment_suite(
     seed: int = 0,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Run several seeded experiments and aggregate their outputs."""
     # Outer loop for repeated experiments with different seeds.
+    # Using deterministic seed offsets makes multi-run averages reproducible.
     results = [run_training(seed=seed + run_idx, **kwargs) for run_idx in range(num_runs)]
     return aggregate_run_results(results)
 
@@ -2132,6 +2377,9 @@ def run_experiment_suite(
 
 
 def main() -> None:
+    """CLI entry point for running the photonic QMEPS animal experiment."""
+    # The CLI is intentionally research-friendly: most switches expose an
+    # internal mechanism directly so experiments can be varied without editing code.
     parser = argparse.ArgumentParser(description="Photonic multi-photon quantum-MEPS animal classifier")
     parser.add_argument("--num-runs", type=int, default=1)
     parser.add_argument("--episodes", type=int, default=8)
@@ -2149,6 +2397,7 @@ def main() -> None:
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
+    # Parse optional comma-separated layer/state selectors for mid-circuit measurements.
     measurement_config = DetectorMeasurementConfig(
         layers=parse_int_list(args.measure_layers),
         states=parse_int_list(args.measure_detector_states),
@@ -2166,6 +2415,7 @@ def main() -> None:
         coupling_radius=args.coupling_radius,
         detector_measurement=measurement_config,
     )
+    # Plotting is optional so the script still works in headless environments.
     plot_path = None
     if not args.no_plot:
         plot_path = plot_training_results(
@@ -2175,6 +2425,8 @@ def main() -> None:
             output_path=args.plot_path,
             show_plot=args.show_plot,
         )
+    # The printed report mirrors the analysis structure computed above:
+    # scalar training metrics, then graph/hypergraph summaries, then duality summaries.
     print("Photonic QMEPS animal classification")
     print("Learning mode:", result["learning_mode"])
     print("Runs:", result["num_runs"])
