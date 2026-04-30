@@ -1292,6 +1292,15 @@ def normalized_l1_coherence(rho: np.ndarray) -> float:
     return float(l1_coherence(rho) / (dim - 1))
 
 
+def dephased_state(rho: np.ndarray) -> np.ndarray:
+    """Return the fully dephased state in the current computational basis."""
+    diag = np.clip(np.real(np.diag(rho)), 0.0, None)
+    total = float(np.sum(diag))
+    if total <= 1e-15:
+        return maximally_uninformative_state(rho.shape[0])
+    return np.diag(diag / total).astype(np.complex128)
+
+
 def maximally_uninformative_state(dim: int) -> np.ndarray:
     """Return the maximally mixed state on a finite-dimensional Hilbert space."""
     if dim <= 0:
@@ -1408,6 +1417,61 @@ def analytical_duality_terms(rho: np.ndarray) -> Dict[str, float]:
         "coherence_envelope": envelope,
         "analytic_margin": analytic_margin,
         **terms,
+    }
+
+
+def dittel_adapted_wave_measures(rho: np.ndarray) -> Dict[str, float]:
+    """Return Dittel-inspired wave measures adapted to one final photonic state."""
+    dim = rho.shape[0]
+    if dim <= 1:
+        return {
+            "wc": 0.0,
+            "wp": 0.0,
+            "offdiag_l2": 0.0,
+        }
+    off_diag = rho - np.diag(np.diag(rho))
+    offdiag_l2_sq = float(np.real(np.trace(off_diag @ dagger(off_diag))))
+    wc = normalized_l1_coherence(rho)
+    # Dittel et al.'s W_P is a normalized purity. In this single-system
+    # adaptation we apply the same L2 idea only to the coherent/off-diagonal
+    # part, so classical population imbalance is not counted as wave character.
+    wp = float(np.sqrt(max(0.0, dim / (dim - 1) * offdiag_l2_sq)))
+    return {
+        "wc": float(np.clip(wc, 0.0, 1.0)),
+        "wp": float(np.clip(wp, 0.0, 1.0)),
+        "offdiag_l2": float(np.sqrt(max(0.0, offdiag_l2_sq))),
+    }
+
+
+def dittel_adapted_visibility_distinguishability(rho: np.ndarray) -> Dict[str, float]:
+    """Return Dittel-inspired V-D measures relative to the dephased final state."""
+    dim = rho.shape[0]
+    if dim <= 1:
+        return {
+            "vt": 0.0,
+            "dt": 1.0,
+            "trace_lhs": 1.0,
+            "trace_slack": 0.0,
+            "vf": 0.0,
+            "df": 1.0,
+            "fidelity_lhs": 1.0,
+            "fidelity_slack": 0.0,
+        }
+    distinguishable = dephased_state(rho)
+    scale = dim / float(dim - 1)
+    vt = float(np.clip(scale * trace_distance(distinguishable, rho), 0.0, 1.0))
+    vf = float(np.clip(scale * (1.0 - fidelity(distinguishable, rho)), 0.0, 1.0))
+    dt = float(1.0 - vt)
+    df = float(1.0 - vf)
+    return {
+        "vt": vt,
+        "dt": dt,
+        "trace_lhs": float(dt + vt),
+        "trace_slack": float(1.0 - (dt + vt)),
+        "vf": vf,
+        "df": df,
+        "fidelity_lhs": float(df + vf),
+        "fidelity_slack": float(1.0 - (df + vf)),
     }
 
 
@@ -1890,24 +1954,45 @@ def compute_wave_particle_quantities(
                 "maximally_uninformative": maximally_uninformative_state(detector_state.shape[0]),
             }
             duality_terms = analytical_duality_terms(final_state)
-            visibility = duality_terms["wave"]
-            particle = duality_terms["particle"]
+            dittel_wave = dittel_adapted_wave_measures(final_state)
+            dittel_vd = dittel_adapted_visibility_distinguishability(final_state)
+            visibility = dittel_wave["wc"]
+            wave_purity = dittel_wave["wp"]
+            particle = float(np.sqrt(max(0.0, 1.0 - wave_purity ** 2)))
+            wave_particle_lhs = float(min(1.0, wave_purity ** 2 + particle ** 2))
+            wc_particle_lhs = float(min(1.0, visibility ** 2 + particle ** 2))
             sample: Dict[str, float] = {
                 "visibility_coherence": visibility,
-                "wave_measure": visibility,
+                "wave_measure": wave_purity,
+                "wave_coherence": visibility,
+                "wave_purity": wave_purity,
+                "dittel_wc": dittel_wave["wc"],
+                "dittel_wp": wave_purity,
+                "dittel_offdiag_l2": dittel_wave["offdiag_l2"],
                 "particle_measure": particle,
                 "path_distinguishability": particle,
                 "coherence_envelope": duality_terms["coherence_envelope"],
                 "analytic_duality_margin": duality_terms["analytic_margin"],
-                "duality_balance": duality_terms["lhs"],
-                "wave_particle_lhs": duality_terms["lhs"],
-                "wave_particle_bound": duality_terms["bound"],
-                "wave_particle_slack": duality_terms["slack"],
-                "wave_particle_satisfied": duality_terms["satisfied"],
-                "visibility_distinguishability_lhs": duality_terms["lhs"],
-                "visibility_distinguishability_bound": duality_terms["bound"],
-                "visibility_distinguishability_slack": duality_terms["slack"],
-                "visibility_distinguishability_satisfied": duality_terms["satisfied"],
+                "duality_balance": wave_particle_lhs,
+                "wave_particle_lhs": wave_particle_lhs,
+                "wave_particle_bound": 1.0,
+                "wave_particle_slack": float(max(0.0, 1.0 - wave_particle_lhs)),
+                "wave_particle_satisfied": float(wave_particle_lhs <= 1.0 + 1e-9),
+                "dittel_wave_particle_wp_pf_lhs": wave_particle_lhs,
+                "dittel_wave_particle_wp_pf_slack": float(max(0.0, 1.0 - wave_particle_lhs)),
+                "dittel_wave_particle_wc_pf_lhs": wc_particle_lhs,
+                "dittel_wave_particle_wc_pf_slack": float(max(0.0, 1.0 - wc_particle_lhs)),
+                "visibility_trace_vt": dittel_vd["vt"],
+                "distinguishability_trace_dt": dittel_vd["dt"],
+                "visibility_distinguishability_lhs": dittel_vd["trace_lhs"],
+                "visibility_distinguishability_bound": 1.0,
+                "visibility_distinguishability_slack": dittel_vd["trace_slack"],
+                "visibility_distinguishability_satisfied": float(dittel_vd["trace_lhs"] <= 1.0 + 1e-9),
+                "visibility_fidelity_vf": dittel_vd["vf"],
+                "distinguishability_fidelity_df": dittel_vd["df"],
+                "visibility_distinguishability_fidelity_lhs": dittel_vd["fidelity_lhs"],
+                "visibility_distinguishability_fidelity_slack": dittel_vd["fidelity_slack"],
+                "visibility_distinguishability_fidelity_satisfied": float(dittel_vd["fidelity_lhs"] <= 1.0 + 1e-9),
                 "photonic_purity": purity(final_state),
                 "detector_purity": purity(detector_state),
                 "photonic_entropy": von_neumann_entropy(final_state),
@@ -1960,8 +2045,8 @@ def compute_wave_particle_quantities(
         "reference_states": ("vacuum", "unmeasured", "maximally_uninformative"),
         "final_state_references": ("unmeasured", "maximally_uninformative"),
         "inequalities": (
-            "wave_measure^2 + particle_measure^2 <= 1, with particle_measure = sqrt(1 - coherence_envelope^2)",
-            "visibility^2 + path_distinguishability^2 <= 1, with path_distinguishability = particle_measure",
+            "Dittel-adapted wave-particle: W_P^2 + P_F^2 <= 1, with W_P the off-diagonal L2 wave measure and P_F = sqrt(1 - W_P^2)",
+            "Dittel-adapted visibility-distinguishability: D_T + V_T <= 1 and D_F + V_F <= 1 relative to the dephased final state",
         ),
     }
 
@@ -2725,9 +2810,12 @@ def main() -> None:
     entry = result["duality_quantities"]["after_deliberation"]
     print(
         f"  after deliberation: V={entry['visibility_coherence']['mean']:.3f}±{entry['visibility_coherence']['std']:.3f}, "
+        f"Wp={entry['wave_purity']['mean']:.3f}±{entry['wave_purity']['std']:.3f}, "
         f"P/D_path={entry['particle_measure']['mean']:.3f}±{entry['particle_measure']['std']:.3f}, "
         f"Ddet(vac)={entry['distinguishability_trace']['mean']:.3f}±{entry['distinguishability_trace']['std']:.3f}, "
-        f"VD lhs={entry['visibility_distinguishability_lhs']['mean']:.3f}, "
+        f"VT={entry['visibility_trace_vt']['mean']:.3f}, "
+        f"DT={entry['distinguishability_trace_dt']['mean']:.3f}, "
+        f"DT+VT={entry['visibility_distinguishability_lhs']['mean']:.3f}, "
         f"VD slack={entry['visibility_distinguishability_slack']['mean']:.3f}, "
         f"WP lhs={entry['wave_particle_lhs']['mean']:.3f}, "
         f"WP slack={entry['wave_particle_slack']['mean']:.3f}"
@@ -2739,10 +2827,11 @@ def main() -> None:
         f"det-ref balance(max-info-free)={entry['detector_reference_balance_to_maximally_uninformative']['mean']:.3f}"
     )
     print(
-        f"    analytic check: P={entry['particle_measure']['mean']:.3f}, "
-        f"coherence envelope={entry['coherence_envelope']['mean']:.3f}, "
-        f"margin={entry['analytic_duality_margin']['mean']:.3f}, "
-        f"satisfied={entry['visibility_distinguishability_satisfied']['mean']:.3f}"
+        f"    analytic check: VF={entry['visibility_fidelity_vf']['mean']:.3f}, "
+        f"DF={entry['distinguishability_fidelity_df']['mean']:.3f}, "
+        f"DF+VF={entry['visibility_distinguishability_fidelity_lhs']['mean']:.3f}, "
+        f"WP satisfied={entry['wave_particle_satisfied']['mean']:.3f}, "
+        f"VD satisfied={entry['visibility_distinguishability_satisfied']['mean']:.3f}"
     )
     print(
         f"    final-state patterns: pairwise Dmean={entry['final_state_measurement_pattern_trace_distance_mean']['mean']:.3f}, "
