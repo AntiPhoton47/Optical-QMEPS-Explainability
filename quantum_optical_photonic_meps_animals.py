@@ -1258,7 +1258,8 @@ def fidelity(rho: np.ndarray, sigma: np.ndarray) -> float:
     sqrt_rho = matrix_sqrt_psd(rho)
     inner = sqrt_rho @ sigma @ sqrt_rho
     sqrt_inner = matrix_sqrt_psd(inner)
-    return float(np.real(np.trace(sqrt_inner)) ** 2)
+    fid = float(np.real(np.trace(sqrt_inner)) ** 2)
+    return float(np.clip(fid, 0.0, 1.0))
 
 
 def bures_distance(rho: np.ndarray, sigma: np.ndarray) -> float:
@@ -1368,6 +1369,101 @@ def _duality_inequality_terms(visibility: float, distinguishability: float, tol:
         "bound": bound,
         "slack": float(bound - lhs),
         "satisfied": float(lhs <= bound + tol),
+    }
+
+
+def normalized_coherence_envelope(rho: np.ndarray) -> float:
+    """Return the positivity-implied upper envelope for normalized l1 coherence."""
+    dim = rho.shape[0]
+    if dim <= 1:
+        return 0.0
+    hermitian = 0.5 * (rho + dagger(rho))
+    probs = np.clip(np.real(np.diag(hermitian)), 0.0, None)
+    total = float(np.sum(probs))
+    if total <= 1e-15:
+        return 0.0
+    probs = probs / total
+    root_probs = np.sqrt(probs)
+    envelope = (float(np.sum(root_probs) ** 2) - 1.0) / float(dim - 1)
+    return float(np.clip(envelope, 0.0, 1.0))
+
+
+def intrinsic_path_distinguishability(rho: np.ndarray) -> float:
+    """Return a distinguishability measure that analytically complements l1 coherence."""
+    envelope = normalized_coherence_envelope(rho)
+    return float(np.sqrt(max(0.0, 1.0 - envelope ** 2)))
+
+
+def analytical_duality_terms(rho: np.ndarray) -> Dict[str, float]:
+    """Compute wave-particle terms guaranteed by density-matrix positivity."""
+    wave = normalized_l1_coherence(rho)
+    envelope = normalized_coherence_envelope(rho)
+    particle = float(np.sqrt(max(0.0, 1.0 - envelope ** 2)))
+    terms = _duality_inequality_terms(wave, particle)
+    # Positivity gives |rho_ij| <= sqrt(rho_ii rho_jj), hence wave <= envelope.
+    analytic_margin = float(max(0.0, envelope ** 2 - wave ** 2))
+    return {
+        "wave": wave,
+        "particle": particle,
+        "coherence_envelope": envelope,
+        "analytic_margin": analytic_margin,
+        **terms,
+    }
+
+
+def state_comparison_metrics(rho: np.ndarray, sigma: np.ndarray, prefix: str) -> Dict[str, float]:
+    """Compute common state-comparison metrics with a shared key prefix."""
+    return {
+        f"{prefix}_trace_distance": trace_distance(rho, sigma),
+        f"{prefix}_hilbert_schmidt": hilbert_schmidt_distance(rho, sigma),
+        f"{prefix}_fidelity": fidelity(rho, sigma),
+        f"{prefix}_bures": bures_distance(rho, sigma),
+        f"{prefix}_qjsd": quantum_jensen_shannon_divergence(rho, sigma),
+    }
+
+
+def pairwise_state_comparison_summary(states: Sequence[np.ndarray], prefix: str) -> Dict[str, float]:
+    """Summarize pairwise distances among several states."""
+    if len(states) < 2:
+        return {
+            f"{prefix}_pair_count": 0.0,
+            f"{prefix}_trace_distance_mean": 0.0,
+            f"{prefix}_trace_distance_max": 0.0,
+            f"{prefix}_hilbert_schmidt_mean": 0.0,
+            f"{prefix}_hilbert_schmidt_max": 0.0,
+            f"{prefix}_fidelity_mean": 1.0,
+            f"{prefix}_fidelity_min": 1.0,
+            f"{prefix}_bures_mean": 0.0,
+            f"{prefix}_bures_max": 0.0,
+            f"{prefix}_qjsd_mean": 0.0,
+            f"{prefix}_qjsd_max": 0.0,
+        }
+
+    trace_vals: List[float] = []
+    hs_vals: List[float] = []
+    fid_vals: List[float] = []
+    bures_vals: List[float] = []
+    qjsd_vals: List[float] = []
+    for i, j in itertools.combinations(range(len(states)), 2):
+        rho = states[i]
+        sigma = states[j]
+        trace_vals.append(trace_distance(rho, sigma))
+        hs_vals.append(hilbert_schmidt_distance(rho, sigma))
+        fid_vals.append(fidelity(rho, sigma))
+        bures_vals.append(bures_distance(rho, sigma))
+        qjsd_vals.append(quantum_jensen_shannon_divergence(rho, sigma))
+    return {
+        f"{prefix}_pair_count": float(len(trace_vals)),
+        f"{prefix}_trace_distance_mean": float(np.mean(trace_vals)),
+        f"{prefix}_trace_distance_max": float(np.max(trace_vals)),
+        f"{prefix}_hilbert_schmidt_mean": float(np.mean(hs_vals)),
+        f"{prefix}_hilbert_schmidt_max": float(np.max(hs_vals)),
+        f"{prefix}_fidelity_mean": float(np.mean(fid_vals)),
+        f"{prefix}_fidelity_min": float(np.min(fid_vals)),
+        f"{prefix}_bures_mean": float(np.mean(bures_vals)),
+        f"{prefix}_bures_max": float(np.max(bures_vals)),
+        f"{prefix}_qjsd_mean": float(np.mean(qjsd_vals)),
+        f"{prefix}_qjsd_max": float(np.max(qjsd_vals)),
     }
 
 
@@ -1768,18 +1864,21 @@ def compute_wave_particle_quantities(
         percept = dataset.encode_photonic_percept(item)
         # We keep an unmeasured full-deliberation trajectory for detector-state
         # comparison, then average over several measured which-way settings.
-        _, unmeasured_info = memory.deliberate_state(
+        unmeasured_final_state, unmeasured_info = memory.deliberate_state(
             percept,
             detector_measurement=DetectorMeasurementConfig(),
             sample_measurements=False,
         )
         unmeasured_detector = tensor_product_states(unmeasured_info["detector_states"])
+        pattern_samples: List[Dict[str, float]] = []
+        pattern_final_states: List[np.ndarray] = []
         for cfg in measurement_configs:
             final_state, info = memory.deliberate_state(
                 percept,
                 detector_measurement=cfg,
                 sample_measurements=False,
             )
+            pattern_final_states.append(final_state)
             detector_state = tensor_product_states(info["detector_states"])
             vacuum_detector = tensor_product_states([
                 ket_to_dm(space.vacuum_state())
@@ -1790,10 +1889,25 @@ def compute_wave_particle_quantities(
                 "unmeasured": unmeasured_detector,
                 "maximally_uninformative": maximally_uninformative_state(detector_state.shape[0]),
             }
-            visibility = normalized_l1_coherence(final_state)
+            duality_terms = analytical_duality_terms(final_state)
+            visibility = duality_terms["wave"]
+            particle = duality_terms["particle"]
             sample: Dict[str, float] = {
                 "visibility_coherence": visibility,
                 "wave_measure": visibility,
+                "particle_measure": particle,
+                "path_distinguishability": particle,
+                "coherence_envelope": duality_terms["coherence_envelope"],
+                "analytic_duality_margin": duality_terms["analytic_margin"],
+                "duality_balance": duality_terms["lhs"],
+                "wave_particle_lhs": duality_terms["lhs"],
+                "wave_particle_bound": duality_terms["bound"],
+                "wave_particle_slack": duality_terms["slack"],
+                "wave_particle_satisfied": duality_terms["satisfied"],
+                "visibility_distinguishability_lhs": duality_terms["lhs"],
+                "visibility_distinguishability_bound": duality_terms["bound"],
+                "visibility_distinguishability_slack": duality_terms["slack"],
+                "visibility_distinguishability_satisfied": duality_terms["satisfied"],
                 "photonic_purity": purity(final_state),
                 "detector_purity": purity(detector_state),
                 "photonic_entropy": von_neumann_entropy(final_state),
@@ -1803,29 +1917,38 @@ def compute_wave_particle_quantities(
                 "measurement_states_count": float(len(cfg.states)),
                 "combined_detector_dim": float(detector_state.shape[0]),
             }
+            final_state_refs = {
+                "unmeasured": unmeasured_final_state,
+                "maximally_uninformative": maximally_uninformative_state(final_state.shape[0]),
+            }
+            for name, reference in final_state_refs.items():
+                sample.update(state_comparison_metrics(
+                    final_state,
+                    reference,
+                    prefix=f"final_state_to_{name}",
+                ))
             for name, reference in references.items():
                 distinguishability = trace_distance(detector_state, reference)
-                wave_particle = _duality_inequality_terms(visibility, distinguishability)
-                visibility_distinguishability = _duality_inequality_terms(visibility, distinguishability)
+                detector_reference_balance = float(visibility ** 2 + distinguishability ** 2)
                 suffix = "" if name == "vacuum" else f"_to_{name}"
                 sample.update({
                     f"distinguishability_trace{suffix}": distinguishability,
-                    f"particle_measure{suffix}": distinguishability,
-                    f"duality_balance{suffix}": visibility_distinguishability["lhs"],
-                    f"wave_particle_lhs{suffix}": wave_particle["lhs"],
-                    f"wave_particle_bound{suffix}": wave_particle["bound"],
-                    f"wave_particle_slack{suffix}": wave_particle["slack"],
-                    f"wave_particle_satisfied{suffix}": wave_particle["satisfied"],
-                    f"visibility_distinguishability_lhs{suffix}": visibility_distinguishability["lhs"],
-                    f"visibility_distinguishability_bound{suffix}": visibility_distinguishability["bound"],
-                    f"visibility_distinguishability_slack{suffix}": visibility_distinguishability["slack"],
-                    f"visibility_distinguishability_satisfied{suffix}": visibility_distinguishability["satisfied"],
+                    f"detector_particle_proxy{suffix}": distinguishability,
+                    f"detector_reference_balance{suffix}": detector_reference_balance,
+                    f"detector_reference_balance_slack{suffix}": float(1.0 - detector_reference_balance),
                     f"detector_hilbert_schmidt{suffix}": hilbert_schmidt_distance(detector_state, reference),
                     f"detector_fidelity_to_{name}": fidelity(detector_state, reference),
                     f"detector_bures_to_{name}": bures_distance(detector_state, reference),
                     f"detector_qjsd_to_{name}": quantum_jensen_shannon_divergence(detector_state, reference),
                 })
-            all_samples.append(sample)
+            pattern_samples.append(sample)
+
+        pattern_summary = pairwise_state_comparison_summary(
+            pattern_final_states,
+            prefix="final_state_measurement_pattern",
+        )
+        for sample in pattern_samples:
+            all_samples.append({**sample, **pattern_summary})
 
     summary: Dict[str, float] = {}
     if all_samples:
@@ -1835,9 +1958,10 @@ def compute_wave_particle_quantities(
         "after_deliberation": summary,
         "measurement_configs": measurement_configs,
         "reference_states": ("vacuum", "unmeasured", "maximally_uninformative"),
+        "final_state_references": ("unmeasured", "maximally_uninformative"),
         "inequalities": (
-            "wave_measure^2 + particle_measure^2 <= 1",
-            "visibility^2 + distinguishability^2 <= 1",
+            "wave_measure^2 + particle_measure^2 <= 1, with particle_measure = sqrt(1 - coherence_envelope^2)",
+            "visibility^2 + path_distinguishability^2 <= 1, with path_distinguishability = particle_measure",
         ),
     }
 
@@ -2486,6 +2610,7 @@ def aggregate_run_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "duality_quantities": {
             "after_deliberation": duality_summary,
             "reference_states": results[0]["duality_quantities"]["reference_states"],
+            "final_state_references": results[0]["duality_quantities"]["final_state_references"],
             "inequalities": results[0]["duality_quantities"]["inequalities"],
         },
     }
@@ -2600,7 +2725,8 @@ def main() -> None:
     entry = result["duality_quantities"]["after_deliberation"]
     print(
         f"  after deliberation: V={entry['visibility_coherence']['mean']:.3f}±{entry['visibility_coherence']['std']:.3f}, "
-        f"D={entry['distinguishability_trace']['mean']:.3f}±{entry['distinguishability_trace']['std']:.3f}, "
+        f"P/D_path={entry['particle_measure']['mean']:.3f}±{entry['particle_measure']['std']:.3f}, "
+        f"Ddet(vac)={entry['distinguishability_trace']['mean']:.3f}±{entry['distinguishability_trace']['std']:.3f}, "
         f"VD lhs={entry['visibility_distinguishability_lhs']['mean']:.3f}, "
         f"VD slack={entry['visibility_distinguishability_slack']['mean']:.3f}, "
         f"WP lhs={entry['wave_particle_lhs']['mean']:.3f}, "
@@ -2609,8 +2735,20 @@ def main() -> None:
     print(
         f"    references: D(unmeasured)={entry['distinguishability_trace_to_unmeasured']['mean']:.3f}, "
         f"D(max-info-free)={entry['distinguishability_trace_to_maximally_uninformative']['mean']:.3f}, "
-        f"VD slack(unmeasured)={entry['visibility_distinguishability_slack_to_unmeasured']['mean']:.3f}, "
-        f"WP slack(max-info-free)={entry['wave_particle_slack_to_maximally_uninformative']['mean']:.3f}"
+        f"det-ref balance(unmeasured)={entry['detector_reference_balance_to_unmeasured']['mean']:.3f}, "
+        f"det-ref balance(max-info-free)={entry['detector_reference_balance_to_maximally_uninformative']['mean']:.3f}"
+    )
+    print(
+        f"    analytic check: P={entry['particle_measure']['mean']:.3f}, "
+        f"coherence envelope={entry['coherence_envelope']['mean']:.3f}, "
+        f"margin={entry['analytic_duality_margin']['mean']:.3f}, "
+        f"satisfied={entry['visibility_distinguishability_satisfied']['mean']:.3f}"
+    )
+    print(
+        f"    final-state patterns: pairwise Dmean={entry['final_state_measurement_pattern_trace_distance_mean']['mean']:.3f}, "
+        f"Dmax={entry['final_state_measurement_pattern_trace_distance_max']['mean']:.3f}, "
+        f"Fmin={entry['final_state_measurement_pattern_fidelity_min']['mean']:.3f}, "
+        f"D(unmeasured)={entry['final_state_to_unmeasured_trace_distance']['mean']:.3f}"
     )
     if plot_path is not None:
         print("Plot saved to:", plot_path)
